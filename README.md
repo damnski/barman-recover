@@ -13,6 +13,7 @@ Items to monitor against:
   * stat -c %y /var/lib/barman/recovery/20160201T000101/postgresql.conf |awk '{print $1}'
 * run a query on your recovered DB
   * psql -p 5555 -c '\dt'
+  * check_postgres has a plethora of goodies to check against (http://bucardo.org/check_postgres/)
 
 Features:
 
@@ -53,3 +54,5 @@ Features:
 * add a stop and/or delete flag for the recovery database
 
 * add configurable options for auto_recovery and manual recover directory destinations
+
+## BSD License

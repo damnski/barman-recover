@@ -2,6 +2,7 @@
 
 : <<LICENSE
 Copyright (c) 2016, Finalsite, LLC.  All rights reserved.
+Copyright (c) 2016, Darryl Wisneski <darryl.wisneski@finalsite.com>
 
 Redistribution and use in source and binary forms, with or without 
 modification, are permitted provided that the following conditions are met:
