@@ -4,13 +4,13 @@ Your backups are only good if you can recover from them.  barman-recover gives y
 
 barman-recover is a bash program that enables automated and semi-automated recovery and startup of a PGbarman recovery database.  It can be run from cron daily to automatically verify barman PITR recovery.    
 
-After your run the automated recovery from cron, use a nagios-type script to reach out to the database and verify it's running and optionally warn you if it's not.  You have just verified your daily backup, or not, and it needs work.  
+After your run the automated recovery from cron, use a nagios-type script to reach out to the database to verify it's running, and optionally warn you if it's not.  You have just verified your daily backup by recovering it, or not, and your process needs work.  
 
 Items to monitor against:
 
 * verify the configured port is listed in netstat
 * check postgresql.conf has the same creation date as today's date
-** stat -c %y /var/lib/barman/recovery/20160201T000101/postgresql.conf |awk '{print $1}'
+  * stat -c %y /var/lib/barman/recovery/20160201T000101/postgresql.conf |awk '{print $1}'
 * run a query on your recovered DB
 
 Features:
