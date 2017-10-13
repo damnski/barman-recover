@@ -1,43 +1,43 @@
 #!/usr/bin/env bash
 
 : <<LICENSE
-Copyright (c) 2016, Finalsite, LLC.  All rights reserved.
-Copyright (c) 2016, Darryl Wisneski <darryl.wisneski@finalsite.com>
+    Copyright (C) 2016-2017, Finalsite
+    Author: Darryl Wisneski <darryl.wisneski@finalsite.com>
+    Author: Carl Corliss <carl.corliss@finalsite.com>
 
-Redistribution and use in source and binary forms, with or without 
-modification, are permitted provided that the following conditions are met:
+    This program is free software: you can redistribute it and/or modify
+    it under the terms of the GNU General Public License as published by
+    the Free Software Foundation, either version 3 of the License, or
+    (at your option) any later version.
 
-1. Redistributions of source code must retain the above copyright notice, this
-   list of conditions and the following disclaimer.
-2. Redistributions in binary form must reproduce the above copyright notice,
-   this list of conditions and the following disclaimer in the documentation
-   and/or other materials provided with the distribution.
+    This program is distributed in the hope that it will be useful,
+    but WITHOUT ANY WARRANTY; without even the implied warranty of
+    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+    GNU General Public License for more details.
 
-THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
-ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
-WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
-DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR
-ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
-(INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
-LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
-ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
-(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
-SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+    You should have received a copy of the GNU General Public License
+    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 LICENSE
 
 PROGRAM="$(/bin/basename "$0")"
-REVISION="0.7.0"
+REVISION="0.8.0"
 
 STATE_OK=0
 STATE_CRITICAL=2
 STATE_UNKNOWN=3
 
+declare -a OPTIONS
+OPTIONS=()
+
 DATE="$(date +%Y%m%d)"
 AUTO_RECOVERY_PATH="/var/lib/barman/auto_recovery"
 MANUAL_RECOVERY_PATH="/var/lib/barman/recovery"
+DEFAULT_PG_VERSION="$(psql --version | grep --color=no -oP '\s+\K\d+\.\d+')"
 AUTO_RECOVERY_PORT="5433"
-AUTO_RECOVERY_APPNAME="thegoods"
+AUTO_RECOVERY_APPNAME="composer"
+BARMAN_LOG="/tmp/pitr-recovery.log"
+RECOVERY_LOG="/tmp/recover.log"
 
 revision_details() {
   echo "$1 v$2"
@@ -52,9 +52,11 @@ usage() {
 Options:
     -a --app-name          Barman server/app name (default: ${AUTO_RECOVERY_APPNAME})
     -b --backup-name       Barman backup name to recover
+    -d --debug             Debug mode
     -h --help              Show usage information and exit
-    -m --manual            Manual mode (default: ${MANUAL_RECOVERY_PATH})
+    -m --manual            Manual mode (default recovery path: ${MANUAL_RECOVERY_PATH})
     -p --port              Listen port for PG recovery DB (default: ${AUTO_RECOVERY_PORT})
+    -P --pg-version        Postgresql major version (default: dynamically lookup current version)
     -l --list-backups      List barman backups
     -r --auto              Automated mode (default: ${AUTO_RECOVERY_PATH})
     -n --target-name       Target name, use with pg_create_restore_point()
@@ -92,6 +94,14 @@ show_help() {
 cat <<DESC
     Recovery helper tool for pgbarman PITR
     Recover a postgresql PITR automatically or manually with a single command
+
+Examples:
+    Automated recovery:
+      /usr/local/bin/barman-recover -r
+    Get the list of available backups:
+      /usr/local/bin/barman-recover -l
+    Recover barman server: example, recover the _20170918T000101_ backup, fire up the postgresql recovery DB on port 5555, recover to time 20170919, at 12:01:00:
+      /usr/local/bin/barman-recover -mv -a composer -b 20170918T000101 -p 5555 -T '2017-09-19 12:01:00 EST'
 DESC
     return 0
 }
@@ -107,7 +117,7 @@ stop_postgres() {
   #kill -0 returns true if the process is found
   if kill -0 ${PID} &>/dev/null; then
     debug "PID: ${PID} found running"
-    if pg_ctl -D "${RECOVERY_PATH}" -mfast stop &>/dev/null; then
+    if ${PG_CTL} -D "${RECOVERY_PATH}" -mfast stop &>/dev/null; then
       verbose "stopping PostgreSQL for pid: ${PID} with RECOVERY_PATH: ${RECOVERY_PATH}"
     else
       exit_with_error "${STATE_CRITICAL}" "RECOVERY_PATH: ${RECOVERY_PATH} could not be deleted"
@@ -163,18 +173,16 @@ list_backup() {
 get_latest_backup_name() {
   debug "Function: ${FUNCNAME}"
   # pick the top backup name
-  LATEST_BACKUP=$(barman list-backup --minimal "${AUTO_RECOVERY_APPNAME}" |head -1)
+  LATEST_BACKUP=$(barman list-backup --minimal "${AUTO_RECOVERY_APPNAME}" |head -n1; exit ${PIPESTATUS[0]})
   local EXITCODE=$?
+  debug "Latest_Backup: ${LATEST_BACKUP}"
   # exit immediately if we failed our test
   [[ "${EXITCODE}" -gt 0 ]] && exit_with_error "${EXITCODE}" \
-    "Error, did not retrieve current dated (${DATE}) backup from barman"
+    "did not retrieve latest backup from barman, received ${LATEST_BACKUP}"
 
-  # if we're here, we're good to continue
-  if [[ ${LATEST_BACKUP} =~ "${DATE}" ]]; then
-    verbose "LATEST_BACKUP: ${LATEST_BACKUP}"
-    verbose "AUTO_RECOVERY_APPNAME: ${AUTO_RECOVERY_APPNAME}"
-    RECOVERY_BACKUP_NAME="${LATEST_BACKUP}"
-  fi
+  verbose "LATEST_BACKUP: ${LATEST_BACKUP}"
+  verbose "AUTO_RECOVERY_APPNAME: ${AUTO_RECOVERY_APPNAME}"
+  RECOVERY_BACKUP_NAME="${LATEST_BACKUP}"
 }
 
 start_barman_recovery() {
@@ -182,33 +190,68 @@ start_barman_recovery() {
   if [[ ! -d "${RECOVERY_PATH}" ]]; then
     mkdir -p "${RECOVERY_PATH}"
   fi
-  if [[ "${OPTIONS}" != "" ]]; then
-    barman recover ${OPTIONS} > /tmp/pitr-recovery.log 2>&1
+
+  if [[ ${#OPTIONS[@]} -ge 1 ]]; then
+    barman recover "${OPTIONS[@]}" > ${BARMAN_LOG} 2>&1
     local EXITCODE=$?
     if [[ ${EXITCODE} -gt 0 ]]; then
-      exit_with_error "${EXITCODE}" "barman recover: ${OPTIONS}"
+      exit_with_error "${EXITCODE}" "barman recover: ${OPTIONS[@]}"
     fi
   else
-    exit_with_error ${STATE_CRITICAL} "Error in OPTIONS value(S): ${OPTIONS}"
+    exit_with_error ${STATE_CRITICAL} "Error in OPTIONS value(S): ${OPTIONS[@]}"
   fi
 }
 
 modify_recovery_config() {
   debug "Function: ${FUNCNAME}"
-  local DATA_DIR="/var/lib/pgsql/9.3/data"
-  local EXITCODE=$(sed -i -e "s/port = 5432/port=${RECOVERY_PORT}/" \
--e "s%data_directory = '${DATA_DIR}'%data_directory = '${RECOVERY_PATH}'%" \
--e "s/^log_directory/#log_directory/" \
-${RECOVERY_PATH}/postgresql.conf)
-  if [[ "${EXITCODE}" == 0 ]]; then
-    exit_with_error ${STATE_CRITICAL} "failed to munge postgresql.conf \
-with OPTIONS: ${RECOVERY_PATH} and ${RECOVERY_PORT}"
-  fi
+  debug "RECOVERY_PORT: ${RECOVERY_PORT}"
+
+  awk "
+    # ignore unix_socket_directories, and just append the updated version
+    # to the end of the file (see END section below)
+    /^\s*unix_socket_directories\s*=/ { next }
+
+    # skip log_directory - it_s not needed for recovery
+    /^\s*log_directory\s*=/ { next }
+
+    # perform various substitutions
+    {
+      # general substitutions
+      gsub(/^\s*port\s*=.+/, \"port = '${RECOVERY_PORT}'\");
+      gsub(/^\s*data_directory\s*=.+/, \"data_directory = '${RECOVERY_PATH}'\")
+      a[b++]=\$0
+    }
+
+    # now output the buffered data to the file
+    END {
+      for (c=0; c <= b; c++) {
+        # output each line to the file specified in ARGV[1]
+        print a[c] > ARGV[1]
+      }
+      # now append unix_socket_directories using the value we want for recovery
+      print \"unix_socket_directories = '/tmp'\" > ARGV[1]
+    }
+  " ${RECOVERY_PATH}/postgresql.conf
+
+  [[ "$?" == 0 ]] || exit_with_error ${STATE_CRITICAL} \
+                     "failed to munge postgresql.conf with OPTIONS: ${RECOVERY_PATH} and ${RECOVERY_PORT}"
 }
 
 start_recovery_db() {
   debug "Function: ${FUNCNAME}"
-  local EXITCODE=$(pg_ctl -D "${RECOVERY_PATH}" start &>/dev/null; echo -n $?)
+  "${PG_CTL}" -D "${RECOVERY_PATH}" start &> ${RECOVERY_LOG}
+  local EXITCODE=$?
+
+  timeout=10
+  while ! pgrep -U barman -f 'postgres.+auto_recovery' &>-; do
+    timeout=$((timeout - 1))
+    (( timeout <= 0 )) && break
+    sleep 1
+  done
+
+  if grep FATAL "${RECOVERY_LOG}"; then
+    exit_with_error ${STATE_CRITICAL} "PostgreSQL failed to start with message: $(cat "${RECOVERY_LOG}")"
+  fi
 
   if [[ ${EXITCODE} -lt 1 ]]; then
     shopt -s nocaseglob
@@ -216,7 +259,7 @@ start_recovery_db() {
       manual)
       echo "PostgreSQL is running on port: ${RECOVERY_PORT}, in datadir: ${RECOVERY_PATH}"
       echo
-      echo "stop the database (as barman) with 'pg_ctl -D "${RECOVERY_PATH}" -mfast stop'"
+      echo "stop the database (as barman) with '"${PG_CTL}" -D "${RECOVERY_PATH}" -mfast stop'"
       ;;
       auto) verbose "PostgreSQL is recovered in automatic mode"
       ;;
@@ -232,26 +275,36 @@ start_recovery_db() {
 get_options() {
   debug "Function: ${FUNCNAME}"
 
+  PG_VERSION=${PG_VERSION:-${DEFAULT_PG_VERSION}}
+
+  PG_CTL="/usr/pgsql-${PG_VERSION}/bin/pg_ctl"
+  if [[ ! -f "${PG_CTL}" ]]; then
+    exit_with_error ${STATE_UNKNOWN} "pg_ctl could not be found at ${PG_CTL}, using PG_VERSION: ${PG_VERSION}"
+  elif [[ ! -x "${PG_CTL}" ]]; then
+    exit_with_error ${STATE_UNKNOWN} "${PG_CTL} is not executable by ${USER}"
+  fi
+
   case "${RECOVERY_MODE}" in
     auto)
       RECOVERY_APPNAME=${AUTO_RECOVERY_APPNAME}
       RECOVERY_PATH=${AUTO_RECOVERY_PATH}
-      RECOVERY_PORT=${AUTO_RECOVERY_PORT}
-      OPTIONS="${RECOVERY_APPNAME} ${RECOVERY_BACKUP_NAME} ${RECOVERY_PATH}"
+      RECOVERY_PORT="${RECOVERY_PORT:-${AUTO_RECOVERY_PORT}}"
+      OPTIONS=(${RECOVERY_APPNAME} ${RECOVERY_BACKUP_NAME} "${RECOVERY_PATH}")
       ;;
     manual)
       RECOVERY_APPNAME="${APPNAME}"
       RECOVERY_BACKUP_NAME="${BACKUP_NAME}"
       RECOVERY_PATH="${MANUAL_RECOVERY_PATH}/${RECOVERY_BACKUP_NAME}"
-      OPTIONS="${RECOVERY_APPNAME} ${RECOVERY_BACKUP_NAME} ${RECOVERY_PATH}"
-      if [[ "${RECOVERY_TARGET_NAME}" != "" ]]; then
-        OPTIONS="--target-name ${RECOVERY_TARGET_NAME} ${OPTIONS}"
-      elif [[ "${RECOVERY_TARGET_TLI}" != "" ]]; then
-        OPTIONS="--target-tli ${RECOVERY_TARGET_TLI} ${OPTIONS}"
-      elif [[ "${RECOVERY_TARGET_TIME}" != "" ]]; then
-        OPTIONS="--target-time ${RECOVERY_TARGET_TIME} ${OPTIONS}"
-      elif [[ "${RECOVERY_TARGET_XID}" != "" ]]; then
-        OPTIONS="--target-xid ${RECOVERY_TARGET_XID} ${OPTIONS}"
+      OPTIONS=(${RECOVERY_APPNAME} ${RECOVERY_BACKUP_NAME} "${RECOVERY_PATH}")
+
+      if [[ -n "${RECOVERY_TARGET_NAME}" ]]; then
+        OPTIONS+=(--target-name ${RECOVERY_TARGET_NAME})
+      elif [[ -n "${RECOVERY_TARGET_TLI}" ]]; then
+        OPTIONS+=(--target-tli ${RECOVERY_TARGET_TLI})
+      elif [[ -n "${RECOVERY_TARGET_TIME}" ]]; then
+        OPTIONS+=(--target-time "${RECOVERY_TARGET_TIME}")
+      elif [[ -n "${RECOVERY_TARGET_XID}" ]]; then
+        OPTIONS+=(--target-xid ${RECOVERY_TARGET_XID})
       fi
       ;;
     list)
@@ -269,7 +322,7 @@ get_options() {
   debug "RECOVERY_APPNAME:     ${RECOVERY_APPNAME}"
   debug "RECOVERY_BACKUP_NAME: ${RECOVERY_BACKUP_NAME}"
   debug "RECOVERY_PATH:        ${RECOVERY_PATH}"
-  debug "OPTIONS:              ${OPTIONS}"
+  debug "OPTIONS:              ${OPTIONS[@]}"
 }
 
 recover() {
@@ -294,7 +347,7 @@ DEBUG=0
 VERBOSE=0
 [[ $# -lt 1 ]] && show_help && exit ${STATE_UNKNOWN}
 
-OPTS=$(getopt --name "${PROGRAM}" -o p:a:n:t:T:x:b:vdrmplhV -l port:,appname,target-name,target-tli,target-time,target-xid,backup-name,verbose,debug,auto,manual,list-backup,help,version -- "$@")
+OPTS=$(getopt --name "${PROGRAM}" -o a:b:n:p:P:t:T:x:b:vdrmlhV -l appname:,backup-name:,port:,pg-version:,target-name:,target-tli:,target-time:,target-xid:,verbose,debug,auto,manual,list-backup,help,version -- "$@")
 [[ $? -ne 0 ]] && exit 1
 eval set -- "${OPTS}"
 
@@ -309,6 +362,7 @@ while true; do
                        RECOVERY_MODE=auto; shift 1;;
     --manual|-m)       RECOVERY_MODE=manual; shift 1;;
     --port|-p)         RECOVERY_PORT=$2; shift 2;;
+    --pg-version|-P)   PG_VERSION=$2; shift 2;;
     --appname|-a)      APPNAME=$2; shift 2;;
     --target-name|-n)  RECOVERY_TARGET_NAME=$2; shift 2;;
     --target-tli|-t)   RECOVERY_TARGET_TLI=$2; shift 2;;

@@ -27,13 +27,13 @@ Features:
 ### manual recovery
 
 * recover server 'thegoods'
-* recover the '20160201T000101' backup
+* recover the '20171012T000101' backup
 * set recovery DB to listen on port 5555
-* recover to time 20160201, at 05:15:00.
-* recovers into directory /var/lib/barman/recovery/20160201T000101
+* recover to time 20171012, at 12:01:00.
+* recovers into directory /var/lib/barman/recovery/20171012T000101
 * Database is fired up (if need be, after old recovery DB is stopped and datadir is nuked)
 
-/usr/local/bin/barman-recover -mv -a thegoods -b 20160201T000101 -p 5555 -T 20160201051500
+/usr/local/bin/barman-recover -m -v -a thegoods -b 20171012T000101 -p 5555 -T '2017-10-12 12:01:00 EST'
 
 ### automatic recovery
 
@@ -49,10 +49,15 @@ Features:
 
 /usr/local/bin/barman-recover -l
 
+### help
+/usr/local/bin/barman-recover
+
 ## todo
 
 * add a stop and/or delete flag for the recovery database
 
 * add configurable options for auto_recovery and manual recover directory destinations
 
-## BSD License
+## GPLv3 License
+
+switched to GPLv3 to be compatible with pgbarman.
